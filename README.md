@@ -60,3 +60,4 @@
 ---
 
 ## Топология сети
+<img width="417" height="473" alt="image" src="https://github.com/user-attachments/assets/481124c6-1a34-402b-8612-3854c30da323" />
