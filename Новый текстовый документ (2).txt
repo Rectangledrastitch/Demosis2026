@@ -1,0 +1,28 @@
+Задание 2 (ISP) – ❌
+Отсутствует включение IP-форвардинга на ISP.
+Нужно добавить до правил iptables:
+
+bash
+sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+Некорректная команда systemctl restart iptables – такой службы нет.
+Оставьте только systemctl restart netfilter-persistent.
+
+Задание 7 (OSPF на HQ-RTR) – ❌
+На HQ-RTR в router ospf объявлена только сеть туннеля 10.0.0.0/30.
+Локальные сети 192.168.100.0/27 и 192.168.200.0/28 отсутствуют.
+→ BR-RTR не узнает маршруты до HQ.
+
+Исправление: добавить в конфиг OSPF на HQ-RTR:
+
+text
+network 192.168.100.0/27 area 0
+network 192.168.200.0/28 area 0
+Задание 10 (DNS на HQ-SRV) – ❌
+Указан interface=ens224.100.
+Но HQ-SRV не имеет VLAN-интерфейса (у него физический ens192 в access-порте VLAN 100).
+Исправление: заменить на interface=ens192 (или реальное имя интерфейса сервера).
+
+Итоговая проверка – ❌
+Упоминается nft list ruleset, хотя на ISP используется iptables.
+Исправление: заменить на iptables -t nat -L -v.

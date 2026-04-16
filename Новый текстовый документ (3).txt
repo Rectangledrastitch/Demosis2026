@@ -1,0 +1,500 @@
+Этап 0. Предварительная настройка всех машин
+На каждой машине выполнить:
+
+bash
+# 1. Настройка репозиториев (если нет интернета – пропустить)
+cat > /etc/apt/sources.list << EOF
+deb https://deb.debian.org/debian bookworm main non-free-firmware
+deb-src https://deb.debian.org/debian bookworm main non-free-firmware
+deb https://deb.debian.org/debian bookworm-updates main non-free-firmware
+deb-src https://deb.debian.org/debian bookworm-updates main non-free-firmware
+EOF
+
+apt update
+
+# 2. Включение IP-форвардинга (для маршрутизаторов, но можно сразу на всех)
+sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+
+# 3. Базовый resolv.conf (временный, потом заменим на DNS-сервер HQ-SRV)
+echo "nameserver 1.1.1.1" > /etc/resolv.conf
+Этап 1. Задание 1 – Имена устройств и IP-адресация
+1.1 Назначение имён (выполнить на каждом устройстве)
+bash
+# ISP
+hostnamectl set-hostname isp.au-team.irpo
+
+# HQ-RTR
+hostnamectl set-hostname hq-rtr.au-team.irpo
+
+# BR-RTR
+hostnamectl set-hostname br-rtr.au-team.irpo
+
+# HQ-SRV
+hostnamectl set-hostname hq-srv.au-team.irpo
+
+# BR-SRV
+hostnamectl set-hostname br-srv.au-team.irpo
+
+# HQ-CLI
+hostnamectl set-hostname hq-cli.au-team.irpo
+Проверка: hostname -f должен выдавать полное доменное имя.
+
+1.2 Настройка IP-адресов (файлы /etc/network/interfaces)
+ISP:
+
+bash
+cat > /etc/network/interfaces << EOF
+auto lo
+iface lo inet loopback
+
+auto ens192
+iface ens192 inet dhcp
+
+auto ens224
+iface ens224 inet static
+    address 172.16.1.1
+    netmask 255.255.255.240
+
+auto ens256
+iface ens256 inet static
+    address 172.16.2.1
+    netmask 255.255.255.240
+EOF
+systemctl restart networking
+HQ-RTR (предварительно, без VLAN – позже переделаем):
+
+bash
+cat > /etc/network/interfaces << EOF
+auto lo
+iface lo inet loopback
+
+auto ens192
+iface ens192 inet static
+    address 172.16.1.2
+    netmask 255.255.255.240
+    gateway 172.16.1.1
+
+auto ens224
+iface ens224 inet static
+    address 192.168.100.1
+    netmask 255.255.255.224
+EOF
+systemctl restart networking
+BR-RTR:
+
+bash
+cat > /etc/network/interfaces << EOF
+auto lo
+iface lo inet loopback
+
+auto ens192
+iface ens192 inet static
+    address 172.16.2.2
+    netmask 255.255.255.240
+    gateway 172.16.2.1
+
+auto ens224
+iface ens224 inet static
+    address 10.10.10.1
+    netmask 255.255.255.240
+EOF
+systemctl restart networking
+HQ-SRV:
+
+bash
+cat > /etc/network/interfaces << EOF
+auto lo
+iface lo inet loopback
+
+auto ens192
+iface ens192 inet static
+    address 192.168.100.2
+    netmask 255.255.255.224
+    gateway 192.168.100.1
+EOF
+systemctl restart networking
+HQ-CLI (статический временно, потом DHCP):
+
+bash
+cat > /etc/network/interfaces << EOF
+auto lo
+iface lo inet loopback
+
+auto ens192
+iface ens192 inet static
+    address 192.168.200.2
+    netmask 255.255.255.240
+    gateway 192.168.200.1
+    dns-nameservers 192.168.100.2
+EOF
+systemctl restart networking
+BR-SRV:
+
+bash
+cat > /etc/network/interfaces << EOF
+auto lo
+iface lo inet loopback
+
+auto ens192
+iface ens192 inet static
+    address 10.10.10.2
+    netmask 255.255.255.240
+    gateway 10.10.10.1
+EOF
+systemctl restart networking
+1.3 Проверка связности
+С HQ-RTR: ping 172.16.1.1 (ISP) и ping 192.168.100.2 (HQ-SRV)
+
+С BR-RTR: ping 172.16.2.1 (ISP) и ping 10.10.10.2 (BR-SRV)
+
+С ISP: ping 172.16.1.2 и ping 172.16.2.2
+
+Этап 2. Задание 2 – Доступ в Интернет на ISP (NAT)
+На ISP выполнить:
+
+bash
+# Установка iptables
+apt install iptables iptables-persistent -y
+
+# Правила NAT (маскарадинг для сетей офисов)
+iptables -t nat -A POSTROUTING -s 172.16.1.0/28 -o ens192 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s 172.16.2.0/28 -o ens192 -j MASQUERADE
+iptables-save > /etc/iptables/rules.v4
+
+# Включение форвардинга (уже сделано в преднастройке)
+systemctl restart netfilter-persistent
+Проверка: с HQ-RTR выполнить ping 1.1.1.1 (должен проходить).
+
+Этап 3. Задание 3 – Локальные учётные записи
+На HQ-SRV и BR-SRV:
+bash
+useradd sshuser -u 2026
+echo "sshuser:P@ssw0rd" | chpasswd
+usermod -aG sudo sshuser
+echo "sshuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/sshuser
+mkdir /home/sshuser
+chown sshuser:sshuser /home/sshuser
+chmod 700 /home/sshuser
+На HQ-RTR и BR-RTR:
+bash
+useradd net_admin
+echo "net_admin:P@ssw0rd" | chpasswd
+usermod -aG sudo net_admin
+echo "net_admin ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/net_admin
+mkdir /home/net_admin
+chown net_admin:net_admin /home/net_admin
+chmod 700 /home/net_admin
+Проверка: id sshuser (UID 2026), su - sshuser -c "sudo whoami" → root.
+
+Этап 4. Задание 4 – Коммутация в сегменте HQ (VLAN)
+4.1 Настройка VLAN на HQ-RTR
+Установить пакет vlan и загрузить модуль:
+
+bash
+apt install vlan -y
+echo "8021q" >> /etc/modules
+modprobe 8021q
+Переконфигурировать /etc/network/interfaces на HQ-RTR:
+
+bash
+cat > /etc/network/interfaces << EOF
+auto lo
+iface lo inet loopback
+
+auto ens192
+iface ens192 inet static
+    address 172.16.1.2
+    netmask 255.255.255.240
+    gateway 172.16.1.1
+
+auto ens224
+iface ens224 inet manual
+    up ip link set dev ens224 up
+
+auto ens224.100
+iface ens224.100 inet static
+    address 192.168.100.1
+    netmask 255.255.255.224
+    vlan-raw-device ens224
+
+auto ens224.200
+iface ens224.200 inet static
+    address 192.168.200.1
+    netmask 255.255.255.240
+    vlan-raw-device ens224
+
+auto ens224.999
+iface ens224.999 inet static
+    address 192.168.99.1
+    netmask 255.255.255.248
+    vlan-raw-device ens224
+EOF
+systemctl restart networking
+4.2 Настройка коммутатора Switch-HQ
+На отдельной ВМ (Debian 12) выполнить:
+
+bash
+apt update && apt install vlan bridge-utils -y
+modprobe 8021q
+echo "8021q" >> /etc/modules
+
+# Создаём мост с VLAN-фильтрацией
+ip link add name br0 type bridge vlan_filtering 1
+ip link set br0 up
+
+# Привязываем физические порты (замените ens6-ens9 на свои интерфейсы)
+ip link set ens6 master br0   # trunk к HQ-RTR
+ip link set ens7 master br0   # access VLAN100 (HQ-SRV)
+ip link set ens8 master br0   # access VLAN200 (HQ-CLI)
+ip link set ens9 master br0   # access VLAN999 (управление)
+
+# Настройка trunk на ens6
+bridge vlan add vid 100 dev ens6
+bridge vlan add vid 200 dev ens6
+bridge vlan add vid 999 dev ens6
+
+# Настройка access портов
+bridge vlan add vid 100 pvid untagged dev ens7
+bridge vlan del vid 1 dev ens7
+bridge vlan add vid 200 pvid untagged dev ens8
+bridge vlan del vid 1 dev ens8
+bridge vlan add vid 999 pvid untagged dev ens9
+bridge vlan del vid 1 dev ens9
+
+# Сохранение конфигурации (опционально)
+cat > /etc/network/interfaces << EOF
+auto lo
+iface lo inet loopback
+
+auto br0
+iface br0 inet manual
+    bridge_ports ens6 ens7 ens8 ens9
+    bridge_vlan_aware yes
+    up bridge vlan add vid 100 dev ens6
+    up bridge vlan add vid 200 dev ens6
+    up bridge vlan add vid 999 dev ens6
+    up bridge vlan add vid 100 pvid untagged dev ens7
+    up bridge vlan add vid 200 pvid untagged dev ens8
+    up bridge vlan add vid 999 pvid untagged dev ens9
+EOF
+Проверка: с HQ-RTR пинг до HQ-SRV (192.168.100.2) должен работать.
+
+Этап 5. Задание 5 – Безопасный удалённый доступ (SSH)
+На HQ-SRV и BR-SRV выполнить:
+
+bash
+apt install openssh-server -y
+
+cat >> /etc/ssh/sshd_config << EOF
+Port 2026
+MaxAuthTries 2
+PasswordAuthentication yes
+Banner /etc/ssh/bannermotd
+AllowUsers sshuser
+EOF
+
+echo "Authorized access only" > /etc/ssh/bannermotd
+systemctl restart sshd
+Проверка: ssh -p 2026 sshuser@<IP-сервера> – пароль P@ssw0rd. После двух неверных попыток – разрыв.
+
+Этап 6. Задание 6 – GRE туннель между HQ-RTR и BR-RTR
+На HQ-RTR добавить в /etc/network/interfaces:
+bash
+cat >> /etc/network/interfaces << EOF
+
+auto gre1
+iface gre1 inet tunnel
+    address 10.0.0.1
+    netmask 255.255.255.252
+    mode gre
+    local 172.16.1.2
+    endpoint 172.16.2.2
+    ttl 64
+EOF
+На BR-RTR добавить:
+bash
+cat >> /etc/network/interfaces << EOF
+
+auto gre1
+iface gre1 inet tunnel
+    address 10.0.0.2
+    netmask 255.255.255.252
+    mode gre
+    local 172.16.2.2
+    endpoint 172.16.1.2
+    ttl 64
+EOF
+Загрузить модуль GRE на обоих:
+bash
+echo "gre" >> /etc/modules
+modprobe gre
+systemctl restart networking
+Проверка: с HQ-RTR ping 10.0.0.2.
+
+Этап 7. Задание 7 – Динамическая маршрутизация (OSPF) через туннель
+Установить FRR на HQ-RTR и BR-RTR:
+
+bash
+apt install -y frr
+sed -i 's/ospfd=no/ospfd=yes/' /etc/frr/daemons
+systemctl restart frr
+systemctl enable frr
+На HQ-RTR настроить OSPF через vtysh:
+bash
+vtysh << EOF
+conf t
+router ospf
+ router-id 1.1.1.1
+ passive-interface default
+ network 10.0.0.0/30 area 0
+ network 192.168.100.0/27 area 0
+ network 192.168.200.0/28 area 0
+ area 0 authentication message-digest
+ exit
+ interface gre1
+  no ip ospf passive
+  ip ospf authentication message-digest
+  ip ospf message-digest-key 1 md5 P@ssw0rd
+  ip ospf network point-to-point
+ exit
+ end
+ write
+ exit
+EOF
+На BR-RTR:
+bash
+vtysh << EOF
+conf t
+router ospf
+ router-id 2.2.2.2
+ passive-interface default
+ network 10.0.0.0/30 area 0
+ network 10.10.10.0/28 area 0
+ area 0 authentication message-digest
+ exit
+ interface gre1
+  no ip ospf passive
+  ip ospf authentication message-digest
+  ip ospf message-digest-key 1 md5 P@ssw0rd
+  ip ospf network point-to-point
+ exit
+ end
+ write
+ exit
+EOF
+Проверка: vtysh -c "show ip ospf neighbor" – должен быть сосед. vtysh -c "show ip route ospf" – видны сети другого офиса.
+
+Этап 8. Задание 8 – NAT для доступа в Интернет из офисов
+На HQ-RTR:
+bash
+iptables -t nat -A POSTROUTING -s 192.168.100.0/27 -o ens192 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s 192.168.200.0/28 -o ens192 -j MASQUERADE
+iptables-save > /etc/iptables/rules.v4
+systemctl restart netfilter-persistent
+На BR-RTR:
+bash
+iptables -t nat -A POSTROUTING -s 10.10.10.0/28 -o ens192 -j MASQUERADE
+iptables-save > /etc/iptables/rules.v4
+systemctl restart netfilter-persistent
+Проверка: с HQ-CLI ping 1.1.1.1 (должен идти через NAT).
+
+Этап 9. Задание 9 – DHCP для HQ-CLI
+На HQ-RTR:
+bash
+apt install isc-dhcp-server -y
+
+cat > /etc/dhcp/dhcpd.conf << EOF
+subnet 192.168.200.0 netmask 255.255.255.240 {
+  range 192.168.200.2 192.168.200.14;
+  option domain-name-servers 192.168.100.2;
+  option domain-name "au-team.irpo";
+  option routers 192.168.200.1;
+  default-lease-time 600;
+  max-lease-time 7200;
+}
+EOF
+
+echo 'INTERFACESv4="ens224.200"' > /etc/default/isc-dhcp-server
+systemctl restart isc-dhcp-server
+systemctl enable isc-dhcp-server
+На HQ-CLI переключить интерфейс на DHCP:
+bash
+cat > /etc/network/interfaces << EOF
+auto lo
+iface lo inet loopback
+
+auto ens192
+iface ens192 inet dhcp
+EOF
+systemctl restart networking
+Проверка: ip -c a – должен получить адрес 192.168.200.2-14, шлюз .1, DNS .100.2.
+
+Этап 10. Задание 10 – DNS-сервер на HQ-SRV
+На HQ-SRV:
+bash
+apt install dnsmasq -y
+
+cat > /etc/dnsmasq.conf << EOF
+interface=ens192
+no-resolv
+server=77.88.8.7
+server=77.88.8.3
+domain=au-team.irpo
+enable-ptr=1
+address=/hq-rtr.au-team.irpo/172.16.1.2
+address=/br-rtr.au-team.irpo/172.16.2.2
+address=/hq-srv.au-team.irpo/192.168.100.2
+address=/hq-cli.au-team.irpo/192.168.200.2
+address=/br-srv.au-team.irpo/10.10.10.2
+address=/docker.au-team.irpo/172.16.1.1
+address=/web.au-team.irpo/172.16.2.1
+EOF
+
+systemctl restart dnsmasq
+systemctl enable dnsmasq
+На всех остальных устройствах (HQ-RTR, BR-RTR, HQ-CLI, BR-SRV) прописать DNS:
+bash
+echo "nameserver 192.168.100.2" > /etc/resolv.conf
+echo "domain au-team.irpo" >> /etc/resolv.conf
+chattr +i /etc/resolv.conf   # защита от перезаписи
+Проверка: nslookup hq-rtr.au-team.irpo 192.168.100.2 → 172.16.1.2.
+
+Этап 11. Задание 11 – Часовой пояс
+На всех устройствах, кроме виртуального коммутатора:
+
+bash
+timedatectl set-timezone Asia/Tomsk   # или Europe/Moscow – по месту экзамена
+Проверка: timedatectl.
+
+Итоговая проверка (выполнить на HQ-CLI)
+bash
+# 1. Связность
+ping -c 3 192.168.100.2      # HQ-SRV
+ping -c 3 10.10.10.2         # BR-SRV (через туннель)
+ping -c 3 8.8.8.8            # Интернет
+
+# 2. DNS
+nslookup hq-rtr.au-team.irpo
+nslookup br-rtr.au-team.irpo
+nslookup docker.au-team.irpo
+nslookup 172.16.1.2
+nslookup 10.10.10.2
+
+# 3. SSH (с любого ПК в сети)
+ssh -p 2026 sshuser@192.168.100.2   # пароль P@ssw0rd
+
+# 4. Маршрутизация OSPF (на HQ-RTR)
+vtysh -c "show ip route ospf"       # должна быть 10.10.10.0/28
+vtysh -c "show ip ospf neighbor"    # должен быть полный сосед
+
+# 5. NAT (с HQ-CLI)
+curl ifconfig.me                    # должен показать внешний IP интерфейса ISP
+Примечания
+Если интерфейсы называются не ens192, ens224, ens256, замените в конфигах на свои (например, eth0, eth1).
+
+При отсутствии пакетов проверьте подключение к репозиториям.
+
+В случае ошибок проверяйте логи: journalctl -xe, tail -f /var/log/syslog.
+
+Все задания выполнены. Удачи на экзамене!
